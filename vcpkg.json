@@ -1,0 +1,9 @@
+{
+  "name": "redis-plus",
+  "version-string": "0.1.0",
+  "description": "An extended Redis server clone in C++20 (asio + poll backends)",
+  "dependencies": [
+    "asio",
+    "gtest"
+  ]
+}
