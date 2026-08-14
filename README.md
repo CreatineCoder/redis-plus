@@ -10,8 +10,8 @@ full data-type coverage — with every claim backed by a reproducible benchmark.
 |---|---|---|
 | 0 | Scaffold, build, test + benchmark harness | **done** |
 | 1 | Connection core: buffers, deferred writes, dual backend | **done (unbuilt — see below)** |
-| 2 | Incremental RESP parser + core commands | not started |
-| 3 | Expiry (lazy + active cycle) | not started |
+| 2 | Incremental RESP parser + core commands | **done (unbuilt)** |
+| 3 | Expiry: active cycle + memory gate | not started |
 | 4 | Persistence (RDB snapshot, AOF) | not started |
 | 5 | Replication (PSYNC, streaming, offsets) | not started |
 | 6 | Data types, transactions, pub/sub | not started |
@@ -51,8 +51,11 @@ ctest --test-dir build --output-on-failure
 redis-cli -p 6379 PING
 ```
 
-Phase 1 answers `PING`, `COMMAND` and `INFO` only — enough to be driven by
-`redis-cli` and measured by `redis-benchmark`. Real command coverage is Phase 2.
+Commands as of Phase 2: `PING ECHO SET GET DEL UNLINK EXISTS TYPE KEYS EXPIRE
+PEXPIRE EXPIREAT PEXPIREAT TTL PTTL PERSIST DBSIZE FLUSHALL FLUSHDB CONFIG INFO
+COMMAND SELECT QUIT`. `SET` supports `EX PX EXAT PXAT NX XX KEEPTTL GET`.
+
+Other data types are Phase 6; everything is a string until then.
 
 ## Why two backends
 

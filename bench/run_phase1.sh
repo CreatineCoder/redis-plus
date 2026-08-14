@@ -16,8 +16,9 @@ SCALE="${SCALE:-$(dirname "$BIN")/conn_scale}"
 PORT="${PORT:-7379}"
 CONNS="${CONNS:-5000}"
 REQUESTS="${REQUESTS:-200000}"
-PIPELINE="${PIPELINE:-1}"
 CLIENTS="${CLIENTS:-50}"
+# Phase 2 added real commands, so the benchmark is no longer PING-only.
+TESTS="${TESTS:-ping,set,get}"
 
 ulimit -n 65535 2>/dev/null || echo "WARN: could not raise fd limit; connection ceiling will be the fd limit, not the server"
 
@@ -36,8 +37,11 @@ run_case() {
     sleep 0.1
   done
 
-  echo "--- throughput (redis-benchmark) ---"
-  redis-benchmark -p "$PORT" -t ping -n "$REQUESTS" -c "$CLIENTS" -P "$PIPELINE" -q
+  echo "--- throughput, unpipelined (redis-benchmark) ---"
+  redis-benchmark -p "$PORT" -t "$TESTS" -n "$REQUESTS" -c "$CLIENTS" -P 1 -q
+
+  echo "--- throughput, pipelined P=16 ---"
+  redis-benchmark -p "$PORT" -t "$TESTS" -n "$REQUESTS" -c "$CLIENTS" -P 16 -q
 
   echo "--- concurrent connections (conn_scale) ---"
   "$SCALE" --port "$PORT" --conns "$CONNS" --rounds 3

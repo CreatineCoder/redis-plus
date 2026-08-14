@@ -5,8 +5,9 @@
 #include <string>
 #include <string_view>
 
-#include "rp/handler.hpp"
+#include "rp/commands.hpp"
 #include "rp/server.hpp"
+#include "rp/store.hpp"
 
 namespace {
 
@@ -55,8 +56,9 @@ int main(int argc, char** argv) {
   }
 
   try {
+    auto store = std::make_shared<rp::Store>();
     auto server = rp::make_server(backend, cfg,
-                                  std::make_shared<rp::PingPongHandler>());
+                                  std::make_shared<rp::RespHandler>(store));
     std::cout << "redis-plus listening on " << cfg.bind_address << ":"
               << server->port() << " (backend="
               << (backend == rp::Backend::kPoll ? "poll" : "asio") << ")\n";

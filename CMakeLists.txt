@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(RP_BUILD_TESTS "Build unit + integration tests" ON)
 option(RP_BUILD_BENCH "Build benchmark harness" ON)
+option(RP_BUILD_FUZZ "Build libFuzzer targets (clang only)" OFF)
 
 find_package(asio CONFIG REQUIRED)
 find_package(Threads REQUIRED)
@@ -16,6 +17,9 @@ add_library(rp_core
   src/asio_server.cpp
   src/poll_server.cpp
   src/handler.cpp
+  src/resp.cpp
+  src/store.cpp
+  src/commands.cpp
   src/stats.cpp
 )
 target_include_directories(rp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -44,4 +48,8 @@ endif()
 if(RP_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(RP_BUILD_FUZZ)
+  add_subdirectory(fuzz)
 endif()

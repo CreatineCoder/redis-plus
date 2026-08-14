@@ -11,9 +11,10 @@
 #include <thread>
 #include <vector>
 
-#include "rp/handler.hpp"
+#include "rp/commands.hpp"
 #include "rp/server.hpp"
 #include "rp/stats.hpp"
+#include "rp/store.hpp"
 
 namespace {
 
@@ -25,8 +26,9 @@ class ServerFixture : public ::testing::TestWithParam<rp::Backend> {
     rp::ServerConfig cfg;
     cfg.bind_address = "127.0.0.1";
     cfg.port = 0;  // let the OS choose, so tests never collide with a real redis
+    store_ = std::make_shared<rp::Store>();
     server_ = rp::make_server(GetParam(), cfg,
-                              std::make_shared<rp::PingPongHandler>());
+                              std::make_shared<rp::RespHandler>(store_));
     port_ = server_->port();
     thread_ = std::thread([this] { server_->run(); });
   }
@@ -48,10 +50,58 @@ class ServerFixture : public ::testing::TestWithParam<rp::Backend> {
     return buf;
   }
 
+  std::shared_ptr<rp::Store> store_;
   std::unique_ptr<rp::Server> server_;
   std::thread thread_;
   std::uint16_t port_ = 0;
 };
+
+// Phase 2 over a real socket: state set on one connection is visible from
+// another, and expiry is honoured end to end.
+TEST_P(ServerFixture, SetGetAcrossConnections) {
+  asio::io_context io;
+  auto writer = connect(io);
+  asio::write(writer, asio::buffer(std::string(
+                          "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$5\r\nvalue\r\n")));
+  EXPECT_EQ(read_exactly(writer, 5), "+OK\r\n");
+
+  auto reader = connect(io);
+  asio::write(reader,
+              asio::buffer(std::string("*2\r\n$3\r\nGET\r\n$1\r\nk\r\n")));
+  EXPECT_EQ(read_exactly(reader, 11), "$5\r\nvalue\r\n");
+}
+
+TEST_P(ServerFixture, KeyExpiresOverTheWire) {
+  asio::io_context io;
+  auto s = connect(io);
+  asio::write(s, asio::buffer(std::string("*5\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv"
+                                          "\r\n$2\r\nPX\r\n$2\r\n50\r\n")));
+  EXPECT_EQ(read_exactly(s, 5), "+OK\r\n");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+  asio::write(s, asio::buffer(std::string("*2\r\n$3\r\nGET\r\n$1\r\nk\r\n")));
+  EXPECT_EQ(read_exactly(s, 5), "$-1\r\n");
+}
+
+// A multi-megabyte value exercises the read path across many recv() calls --
+// impossible with the reference implementation's 1024-byte buffer.
+TEST_P(ServerFixture, LargeValueRoundTrip) {
+  const std::string value(4 * 1024 * 1024, 'z');
+  const std::string request = "*3\r\n$3\r\nSET\r\n$3\r\nbig\r\n$" +
+                              std::to_string(value.size()) + "\r\n" + value +
+                              "\r\n";
+  asio::io_context io;
+  auto s = connect(io);
+  std::thread writer([&] { asio::write(s, asio::buffer(request)); });
+  EXPECT_EQ(read_exactly(s, 5), "+OK\r\n");
+  writer.join();
+
+  asio::write(s, asio::buffer(std::string("*2\r\n$3\r\nGET\r\n$3\r\nbig\r\n")));
+  const std::string header = "$" + std::to_string(value.size()) + "\r\n";
+  const std::string reply = read_exactly(s, header.size() + value.size() + 2);
+  EXPECT_EQ(reply.substr(0, header.size()), header);
+  EXPECT_EQ(reply.substr(header.size(), value.size()), value);
+}
 
 TEST_P(ServerFixture, RespondsToPing) {
   asio::io_context io;

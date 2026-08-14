@@ -29,17 +29,33 @@ is built on top of persistence, not beside it.
 **Gate:** `conn_scale` sustains the target connection count with zero failures,
 and the delta vs. legacy is recorded in `bench/results.md`.
 
-## Phase 2 — RESP + core commands
+## Phase 2 — RESP + core commands ✅ written
 
-Incremental parser resuming across arbitrary read boundaries; inline commands;
-full RESP2 types; strict length validation; fuzz target. Commands: `PING ECHO
-SET GET DEL EXISTS TYPE KEYS CONFIG COMMAND`.
-**Gate:** ops/sec pipelined vs. unpipelined; % of real Redis; fuzz clean.
+- `parse_request()` is incremental and **total**: it resumes at any read
+  boundary and returns a status for every possible byte sequence. Length
+  fields are range-checked before allocation; integer overflow is rejected.
+  The reference implementation's `while (arr[pos] != '\r')` walked off the end
+  of its buffer on truncated input — that class of bug is gone by construction.
+- Inline commands (telnet / `redis-cli` raw) alongside multibulk.
+- `Store` with an injectable clock, so expiry is tested exactly rather than by
+  sleeping. Lazy expiry as before, plus the `reap_expired` primitive Phase 3's
+  active cycle drives.
+- `CommandTable`: 23 commands, with `SET`'s full option grammar
+  (`EX PX EXAT PXAT NX XX KEEPTTL GET`) and correct edge-case replies.
+- Randomized robustness tests (fixed seed, in CI) plus a libFuzzer target in
+  `fuzz/` for clang builds.
+
+**Gate:** ops/sec pipelined vs. unpipelined; % of real Redis; one clean
+fuzzing hour under ASan+UBSan with the hours recorded.
 
 ## Phase 3 — expiry
 
-Keep lazy expiry, add the active sampling cycle; `TTL PERSIST EXPIRE`.
-**Gate:** RSS stays flat under sustained expiring-key churn (before/after).
+Drive `Store::reap_expired` from an active sampling cycle on the event loop
+(redis samples 20 keys per pass, repeating while >25% were expired), so keys
+that are never touched again stop accumulating. `raw_size()` must converge on
+`size()`.
+**Gate:** RSS stays flat under sustained expiring-key churn (before/after
+graph), and the throughput from Phase 2 does not regress.
 
 ## Phase 4 — persistence
 
