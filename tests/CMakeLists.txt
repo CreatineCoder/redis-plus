@@ -6,6 +6,7 @@ add_executable(rp_tests
   test_resp.cpp
   test_resp_fuzz.cpp
   test_store.cpp
+  test_expiry.cpp
   test_commands.cpp
   test_server.cpp
 )

@@ -57,8 +57,11 @@ int main(int argc, char** argv) {
 
   try {
     auto store = std::make_shared<rp::Store>();
-    auto server = rp::make_server(backend, cfg,
-                                  std::make_shared<rp::RespHandler>(store));
+    // Active expiry rides the server cron on the event-loop thread, so keys
+    // that are set with a TTL and never read again are still reclaimed.
+    auto server = rp::make_server(
+        backend, cfg, std::make_shared<rp::RespHandler>(store),
+        [store] { store->active_expire_cycle(); });
     std::cout << "redis-plus listening on " << cfg.bind_address << ":"
               << server->port() << " (backend="
               << (backend == rp::Backend::kPoll ? "poll" : "asio") << ")\n";

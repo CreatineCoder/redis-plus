@@ -1,5 +1,6 @@
 #include <asio.hpp>
 
+#include <chrono>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -113,16 +114,20 @@ class Session : public std::enable_shared_from_this<Session> {
 
 class AsioServer : public Server {
  public:
-  AsioServer(const ServerConfig& cfg, std::shared_ptr<CommandHandler> handler)
+  AsioServer(const ServerConfig& cfg, std::shared_ptr<CommandHandler> handler,
+             CronTask cron)
       : cfg_(cfg),
         handler_(std::move(handler)),
+        cron_(std::move(cron)),
         acceptor_(io_, tcp::endpoint(asio::ip::make_address(cfg.bind_address),
-                                     cfg.port)) {
+                                     cfg.port)),
+        cron_timer_(io_) {
     acceptor_.listen(cfg_.backlog);
   }
 
   void run() override {
     accept();
+    schedule_cron();
     io_.run();
   }
 
@@ -130,6 +135,7 @@ class AsioServer : public Server {
     asio::post(io_, [this] {
       asio::error_code ignored;
       acceptor_.close(ignored);
+      cron_timer_.cancel(ignored);
       io_.stop();
     });
   }
@@ -155,17 +161,32 @@ class AsioServer : public Server {
     });
   }
 
+  // Server cron: runs on the same thread as every connection, so the store
+  // needs no locking and the cycle must stay cheap.
+  void schedule_cron() {
+    if (!cron_) return;
+    cron_timer_.expires_after(std::chrono::milliseconds(cfg_.cron_interval_ms));
+    cron_timer_.async_wait([this](const asio::error_code& ec) {
+      if (ec) return;  // cancelled by stop()
+      cron_();
+      schedule_cron();
+    });
+  }
+
   ServerConfig cfg_;
   std::shared_ptr<CommandHandler> handler_;
+  CronTask cron_;
   asio::io_context io_{1};
   tcp::acceptor acceptor_;
+  asio::steady_timer cron_timer_;
 };
 
 }  // namespace
 
 std::unique_ptr<Server> make_asio_server(const ServerConfig& cfg,
-                                         std::shared_ptr<CommandHandler> h) {
-  return std::make_unique<AsioServer>(cfg, std::move(h));
+                                         std::shared_ptr<CommandHandler> h,
+                                         CronTask cron) {
+  return std::make_unique<AsioServer>(cfg, std::move(h), std::move(cron));
 }
 
 }  // namespace rp

@@ -11,7 +11,7 @@ full data-type coverage — with every claim backed by a reproducible benchmark.
 | 0 | Scaffold, build, test + benchmark harness | **done** |
 | 1 | Connection core: buffers, deferred writes, dual backend | **done (unbuilt — see below)** |
 | 2 | Incremental RESP parser + core commands | **done (unbuilt)** |
-| 3 | Expiry: active cycle + memory gate | not started |
+| 3 | Expiry: active cycle + memory gate | **done (unbuilt)** |
 | 4 | Persistence (RDB snapshot, AOF) | not started |
 | 5 | Replication (PSYNC, streaming, offsets) | not started |
 | 6 | Data types, transactions, pub/sub | not started |

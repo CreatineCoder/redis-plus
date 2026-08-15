@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -22,7 +23,15 @@ struct ServerConfig {
   std::size_t read_chunk = 16 * 1024;
 
   bool tcp_nodelay = true;
+
+  // Server cron period. 100ms == redis' default hz=10. The active expiry
+  // cycle rides on this.
+  int cron_interval_ms = 100;
 };
+
+// Periodic work run on the event loop thread, between client events. Must be
+// cheap and must not block -- it shares the thread with every connection.
+using CronTask = std::function<void()>;
 
 // Backend-agnostic interface so the poll() implementation and the asio
 // implementation are interchangeable, and so the benchmark harness can compare
@@ -42,6 +51,7 @@ enum class Backend {
 
 // Throws std::invalid_argument if the backend is unavailable on this platform.
 std::unique_ptr<Server> make_server(Backend backend, const ServerConfig& cfg,
-                                    std::shared_ptr<CommandHandler> handler);
+                                    std::shared_ptr<CommandHandler> handler,
+                                    CronTask cron = nullptr);
 
 }  // namespace rp

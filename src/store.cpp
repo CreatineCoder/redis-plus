@@ -16,8 +16,9 @@ std::int64_t now_ms() {
 std::optional<std::string> Store::get(const std::string& key) {
   auto it = map_.find(key);
   if (it == map_.end()) return std::nullopt;
-  if (expired(it->second)) {
-    map_.erase(it);
+  if (is_expired(key)) {
+    remove(key);
+    ++stats_.expired_lazy;
     return std::nullopt;
   }
   return it->second.value;
@@ -25,83 +26,154 @@ std::optional<std::string> Store::get(const std::string& key) {
 
 void Store::set(const std::string& key, std::string value,
                 std::int64_t expire_at) {
-  auto& entry = map_[key];
-  entry.value = std::move(value);
-  entry.expire_at = expire_at;
+  map_[key].value = std::move(value);
+  if (expire_at == kNoExpiry) {
+    expires_.erase(key);
+  } else {
+    expires_[key] = expire_at;
+  }
 }
 
 bool Store::erase(const std::string& key) {
-  auto it = map_.find(key);
-  if (it == map_.end()) return false;
-  const bool was_live = !expired(it->second);
-  map_.erase(it);
+  if (map_.find(key) == map_.end()) return false;
+  const bool was_live = !is_expired(key);
+  if (!was_live) ++stats_.expired_lazy;
+  remove(key);
   return was_live;  // deleting an already-expired key reports 0, as redis does
 }
 
 bool Store::contains(const std::string& key) { return get(key).has_value(); }
 
 std::int64_t Store::pttl(const std::string& key) {
-  auto it = map_.find(key);
-  if (it == map_.end()) return -2;
-  if (expired(it->second)) {
-    map_.erase(it);
+  if (map_.find(key) == map_.end()) return -2;
+  if (is_expired(key)) {
+    remove(key);
+    ++stats_.expired_lazy;
     return -2;
   }
-  if (it->second.expire_at == kNoExpiry) return -1;
-  return it->second.expire_at - clock_();
+  const auto it = expires_.find(key);
+  if (it == expires_.end()) return -1;
+  return it->second - clock_();
 }
 
 bool Store::expire_at(const std::string& key, std::int64_t deadline_ms) {
-  auto it = map_.find(key);
-  if (it == map_.end() || expired(it->second)) return false;
+  if (map_.find(key) == map_.end()) return false;
+  if (is_expired(key)) {
+    remove(key);
+    ++stats_.expired_lazy;
+    return false;
+  }
   if (deadline_ms <= clock_()) {
-    map_.erase(it);  // a deadline in the past deletes immediately
+    remove(key);  // a deadline in the past deletes immediately
     return true;
   }
-  it->second.expire_at = deadline_ms;
+  expires_[key] = deadline_ms;
   return true;
 }
 
 bool Store::persist(const std::string& key) {
-  auto it = map_.find(key);
-  if (it == map_.end() || expired(it->second)) return false;
-  if (it->second.expire_at == kNoExpiry) return false;
-  it->second.expire_at = kNoExpiry;
-  return true;
+  if (map_.find(key) == map_.end()) return false;
+  if (is_expired(key)) {
+    remove(key);
+    ++stats_.expired_lazy;
+    return false;
+  }
+  return expires_.erase(key) > 0;
 }
 
 std::vector<std::string> Store::keys(std::string_view pattern) {
   std::vector<std::string> out;
-  for (auto it = map_.begin(); it != map_.end();) {
-    if (expired(it->second)) {
-      it = map_.erase(it);
+  std::vector<std::string> dead;
+  for (const auto& [key, entry] : map_) {
+    if (is_expired(key)) {
+      dead.push_back(key);
       continue;
     }
-    if (glob_match(pattern, it->first)) out.push_back(it->first);
-    ++it;
+    if (glob_match(pattern, key)) out.push_back(key);
+  }
+  for (const auto& key : dead) {
+    remove(key);
+    ++stats_.expired_lazy;
   }
   return out;
 }
 
 std::size_t Store::size() {
-  std::size_t live = 0;
-  for (const auto& [key, entry] : map_) {
-    if (!expired(entry)) ++live;
+  std::size_t expired = 0;
+  const std::int64_t now = clock_();
+  for (const auto& [key, deadline] : expires_) {
+    if (now >= deadline) ++expired;
   }
-  return live;
+  return map_.size() - expired;
+}
+
+std::vector<const std::string*> Store::sample_expiring(std::size_t n) {
+  std::vector<const std::string*> out;
+  if (expires_.empty() || n == 0) return out;
+
+  const std::size_t buckets = expires_.bucket_count();
+  if (buckets == 0) return out;
+  if (cursor_ >= buckets) cursor_ = 0;
+
+  // Walk buckets from the persistent cursor, wrapping at most once so an
+  // index full of live keys cannot spin here.
+  for (std::size_t visited = 0; visited < buckets && out.size() < n;
+       ++visited) {
+    const std::size_t bucket = (cursor_ + visited) % buckets;
+    for (auto it = expires_.begin(bucket);
+         it != expires_.end(bucket) && out.size() < n; ++it) {
+      out.push_back(&it->first);
+    }
+  }
+  cursor_ = (cursor_ + 1) % buckets;
+  return out;
+}
+
+std::size_t Store::active_expire_cycle(const ExpiryConfig& cfg) {
+  ++stats_.cycles;
+  std::size_t total = 0;
+
+  for (std::size_t pass = 0; pass < cfg.max_passes; ++pass) {
+    if (expires_.empty()) break;
+    ++stats_.passes;
+
+    const auto sampled = sample_expiring(cfg.sample_size);
+    if (sampled.empty()) break;
+
+    // Copy out the keys to delete: erasing invalidates the pointers into
+    // expires_ that `sampled` holds.
+    const std::int64_t now = clock_();
+    std::vector<std::string> dead;
+    for (const auto* key : sampled) {
+      const auto it = expires_.find(*key);
+      if (it != expires_.end() && now >= it->second) dead.push_back(*key);
+    }
+    for (const auto& key : dead) remove(key);
+
+    total += dead.size();
+    stats_.expired_active += dead.size();
+
+    // Stop early once the sample comes back mostly alive -- the keyspace is
+    // healthy and further passes would be wasted work.
+    const std::size_t threshold =
+        sampled.size() * static_cast<std::size_t>(cfg.continue_threshold_pct) /
+        100;
+    if (dead.size() <= threshold) break;
+  }
+
+  return total;
 }
 
 std::size_t Store::reap_expired(std::size_t limit) {
-  std::size_t reaped = 0;
-  for (auto it = map_.begin(); it != map_.end() && reaped < limit;) {
-    if (expired(it->second)) {
-      it = map_.erase(it);
-      ++reaped;
-    } else {
-      ++it;
-    }
+  std::vector<std::string> dead;
+  const std::int64_t now = clock_();
+  for (const auto& [key, deadline] : expires_) {
+    if (dead.size() >= limit) break;
+    if (now >= deadline) dead.push_back(key);
   }
-  return reaped;
+  for (const auto& key : dead) remove(key);
+  stats_.expired_active += dead.size();
+  return dead.size();
 }
 
 }  // namespace rp

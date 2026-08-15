@@ -19,7 +19,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -46,8 +48,12 @@ struct Conn {
 
 class PollServer : public Server {
  public:
-  PollServer(const ServerConfig& cfg, std::shared_ptr<CommandHandler> handler)
-      : cfg_(cfg), handler_(std::move(handler)), scratch_(cfg.read_chunk) {
+  PollServer(const ServerConfig& cfg, std::shared_ptr<CommandHandler> handler,
+             CronTask cron)
+      : cfg_(cfg),
+        handler_(std::move(handler)),
+        cron_(std::move(cron)),
+        scratch_(cfg.read_chunk) {
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0) throw std::runtime_error("socket() failed");
 
@@ -92,7 +98,13 @@ class PollServer : public Server {
         fds.push_back({fd, events, 0});
       }
 
-      const int ready = ::poll(fds.data(), fds.size(), kPollTimeoutMs);
+      // poll() already wakes on a timeout, so the cron rides on it directly
+      // rather than needing a timerfd.
+      const int timeout =
+          cron_ ? std::min(kPollTimeoutMs, cfg_.cron_interval_ms)
+                : kPollTimeoutMs;
+      const int ready = ::poll(fds.data(), fds.size(), timeout);
+      run_cron_if_due();
       if (ready < 0) {
         if (errno == EINTR) continue;
         break;
@@ -204,6 +216,17 @@ class PollServer : public Server {
     return !c.close_after_flush;
   }
 
+  void run_cron_if_due() {
+    if (!cron_) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_cron_ <
+        std::chrono::milliseconds(cfg_.cron_interval_ms)) {
+      return;
+    }
+    last_cron_ = now;
+    cron_();
+  }
+
   void drop(int fd) {
     if (conns_.erase(fd) == 0) return;
     ::close(fd);
@@ -219,6 +242,9 @@ class PollServer : public Server {
 
   ServerConfig cfg_;
   std::shared_ptr<CommandHandler> handler_;
+  CronTask cron_;
+  std::chrono::steady_clock::time_point last_cron_ =
+      std::chrono::steady_clock::now();
   std::vector<char> scratch_;
   std::unordered_map<int, std::unique_ptr<Conn>> conns_;
   int listen_fd_ = -1;
@@ -229,8 +255,9 @@ class PollServer : public Server {
 }  // namespace
 
 std::unique_ptr<Server> make_poll_server(const ServerConfig& cfg,
-                                         std::shared_ptr<CommandHandler> h) {
-  return std::make_unique<PollServer>(cfg, std::move(h));
+                                         std::shared_ptr<CommandHandler> h,
+                                         CronTask cron) {
+  return std::make_unique<PollServer>(cfg, std::move(h), std::move(cron));
 }
 
 }  // namespace rp
@@ -242,7 +269,8 @@ std::unique_ptr<Server> make_poll_server(const ServerConfig& cfg,
 
 namespace rp {
 std::unique_ptr<Server> make_poll_server(const ServerConfig&,
-                                         std::shared_ptr<CommandHandler>) {
+                                         std::shared_ptr<CommandHandler>,
+                                         CronTask) {
   throw std::invalid_argument(
       "poll backend is POSIX-only; use --backend=asio on this platform");
 }

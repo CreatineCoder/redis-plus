@@ -225,8 +225,25 @@ std::string cmd_flushall(Store& store) {
   return reply::ok();
 }
 
-std::string cmd_info() {
-  const std::string info = Stats::instance().to_info();
+std::string cmd_info(Store& store) {
+  // Connection-level counters come from Stats; keyspace and expiry counters
+  // can only come from the store. Both use real redis' field names so that
+  // redis-cli INFO and the benchmark scripts read them unmodified.
+  const auto& expiry = store.expiry_stats();
+  std::string info = Stats::instance().to_info();
+  info += "expired_keys:" +
+          std::to_string(expiry.expired_lazy + expiry.expired_active) + "\r\n";
+  info += "expired_keys_lazy:" + std::to_string(expiry.expired_lazy) + "\r\n";
+  info +=
+      "expired_keys_active:" + std::to_string(expiry.expired_active) + "\r\n";
+  info += "active_expire_cycles:" + std::to_string(expiry.cycles) + "\r\n";
+  info += "active_expire_passes:" + std::to_string(expiry.passes) + "\r\n";
+  info += "\r\n# Keyspace\r\n";
+  // Always emitted, unlike real redis, which omits empty databases: `tracked`
+  // minus `keys` is exactly the expiry backlog, and monitoring it is the point.
+  info += "db0:keys=" + std::to_string(store.size()) +
+          ",expires=" + std::to_string(store.expires_size()) +
+          ",tracked=" + std::to_string(store.raw_size()) + "\r\n";
   return reply::bulk(info);
 }
 
@@ -256,7 +273,7 @@ std::string CommandTable::dispatch(const Args& args) {
   if (name == "CONFIG") return cmd_config(args);
   if (name == "DBSIZE") return cmd_dbsize(store_, args);
   if (name == "FLUSHALL" || name == "FLUSHDB") return cmd_flushall(store_);
-  if (name == "INFO") return cmd_info();
+  if (name == "INFO") return cmd_info(store_);
   if (name == "COMMAND") return reply::empty_array();
   if (name == "SELECT") return reply::ok();  // single-db; accept and ignore
   if (name == "QUIT") return reply::ok();

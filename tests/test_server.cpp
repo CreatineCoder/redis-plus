@@ -26,9 +26,12 @@ class ServerFixture : public ::testing::TestWithParam<rp::Backend> {
     rp::ServerConfig cfg;
     cfg.bind_address = "127.0.0.1";
     cfg.port = 0;  // let the OS choose, so tests never collide with a real redis
+    cfg.cron_interval_ms = 20;  // keep the expiry test brisk
     store_ = std::make_shared<rp::Store>();
+    auto store = store_;
     server_ = rp::make_server(GetParam(), cfg,
-                              std::make_shared<rp::RespHandler>(store_));
+                              std::make_shared<rp::RespHandler>(store_),
+                              [store] { store->active_expire_cycle(); });
     port_ = server_->port();
     thread_ = std::thread([this] { server_->run(); });
   }
@@ -48,6 +51,25 @@ class ServerFixture : public ::testing::TestWithParam<rp::Backend> {
     std::string buf(n, '\0');
     asio::read(s, asio::buffer(buf.data(), n));
     return buf;
+  }
+
+  // Send `request` and read back one bulk-string reply. Reading by length
+  // rather than by delimiter, because a bulk payload (INFO) contains CRLFs.
+  static std::string read_bulk(tcp::socket& s, const std::string& request) {
+    asio::write(s, asio::buffer(request));
+
+    std::string header;
+    for (;;) {  // "$<len>\r\n"
+      char c = 0;
+      asio::read(s, asio::buffer(&c, 1));
+      header.push_back(c);
+      if (header.size() >= 2 && header.compare(header.size() - 2, 2, "\r\n") == 0) {
+        break;
+      }
+    }
+    const std::size_t len = std::stoul(header.substr(1));
+    const std::string body = read_exactly(s, len + 2);
+    return body.substr(0, len);
   }
 
   std::shared_ptr<rp::Store> store_;
@@ -81,6 +103,29 @@ TEST_P(ServerFixture, KeyExpiresOverTheWire) {
   std::this_thread::sleep_for(std::chrono::milliseconds(120));
   asio::write(s, asio::buffer(std::string("*2\r\n$3\r\nGET\r\n$1\r\nk\r\n")));
   EXPECT_EQ(read_exactly(s, 5), "$-1\r\n");
+}
+
+// Phase 3 end to end: keys that expire and are never read again must be
+// reclaimed by the server cron. Queried through INFO rather than by touching
+// the store directly, which would race with the event-loop thread.
+TEST_P(ServerFixture, CronReclaimsUntouchedExpiredKeys) {
+  asio::io_context io;
+  auto s = connect(io);
+
+  for (int i = 0; i < 200; ++i) {
+    const std::string key = "k" + std::to_string(i);
+    std::string req = "*5\r\n$3\r\nSET\r\n$" + std::to_string(key.size()) +
+                      "\r\n" + key + "\r\n$1\r\nv\r\n$2\r\nPX\r\n$2\r\n30\r\n";
+    asio::write(s, asio::buffer(req));
+    EXPECT_EQ(read_exactly(s, 5), "+OK\r\n");
+  }
+
+  // Several cron periods, without ever reading the keys back.
+  std::this_thread::sleep_for(std::chrono::milliseconds(600));
+
+  const std::string info = read_bulk(s, "*1\r\n$4\r\nINFO\r\n");
+  EXPECT_NE(info.find("db0:keys=0,"), std::string::npos)
+      << "expired keys were not reclaimed by the cron: " << info;
 }
 
 // A multi-megabyte value exercises the read path across many recv() calls --

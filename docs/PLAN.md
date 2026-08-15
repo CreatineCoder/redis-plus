@@ -48,14 +48,24 @@ and the delta vs. legacy is recorded in `bench/results.md`.
 **Gate:** ops/sec pipelined vs. unpipelined; % of real Redis; one clean
 fuzzing hour under ASan+UBSan with the hours recorded.
 
-## Phase 3 — expiry
+## Phase 3 — expiry ✅ written
 
-Drive `Store::reap_expired` from an active sampling cycle on the event loop
-(redis samples 20 keys per pass, repeating while >25% were expired), so keys
-that are never touched again stop accumulating. `raw_size()` must converge on
-`size()`.
-**Gate:** RSS stays flat under sustained expiring-key churn (before/after
-graph), and the throughput from Phase 2 does not regress.
+- Keys with a TTL are indexed separately in `expires_`, as redis does, so the
+  cycle samples only expiry candidates instead of walking the keyspace. This
+  index is what makes the gate reachable at all.
+- `active_expire_cycle()`: sample 20, repeat while >25% of the sample was
+  dead, at most 16 passes. Aggressive on a rotting keyspace, nearly free on a
+  healthy one, and bounded either way so it cannot stall the loop.
+- A persistent bucket cursor, so successive cycles sweep the whole index
+  rather than re-examining the same keys.
+- Server cron (`cron_interval_ms`, default 100ms = redis' hz=10) on both
+  backends: an asio `steady_timer`, and the existing `poll()` timeout. It runs
+  on the event-loop thread, so the store still needs no locking.
+- `INFO` reports `expired_keys{,_lazy,_active}`, cycle/pass counts, and
+  `db0:keys=…,expires=…,tracked=…`. `tracked - keys` is the expiry backlog.
+
+**Gate:** `bench/run_phase3.sh` — RSS plateaus under sustained
+never-read expiring writes, and throughput from Phase 2 does not regress.
 
 ## Phase 4 — persistence
 
