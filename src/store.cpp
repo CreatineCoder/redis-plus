@@ -117,15 +117,21 @@ std::vector<const std::string*> Store::sample_expiring(std::size_t n) {
 
   // Walk buckets from the persistent cursor, wrapping at most once so an
   // index full of live keys cannot spin here.
-  for (std::size_t visited = 0; visited < buckets && out.size() < n;
-       ++visited) {
+  std::size_t visited = 0;
+  for (; visited < buckets && out.size() < n; ++visited) {
     const std::size_t bucket = (cursor_ + visited) % buckets;
     for (auto it = expires_.begin(bucket);
          it != expires_.end(bucket) && out.size() < n; ++it) {
       out.push_back(&it->first);
     }
   }
-  cursor_ = (cursor_ + 1) % buckets;
+
+  // Resume past every bucket this sample consumed, not one bucket on. Buckets
+  // hold roughly one key each, so a 20-key sample spans ~20 buckets: advancing
+  // by one would make the next pass re-sample the keys this one just cleaned,
+  // see them alive, conclude the keyspace is healthy and stop -- which capped
+  // reclamation at one sample per cron tick no matter how large the backlog.
+  cursor_ = (cursor_ + visited) % buckets;
   return out;
 }
 

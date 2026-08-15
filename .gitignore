@@ -10,3 +10,10 @@ vcpkg_installed/
 *.log
 compile_commands.json
 CMakeUserPresets.json
+
+# portable toolchain / local run artifacts
+*.tmp-*
+boot.log
+run.log
+standalone.log
+server.log

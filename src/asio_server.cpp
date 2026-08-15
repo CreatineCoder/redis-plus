@@ -135,7 +135,9 @@ class AsioServer : public Server {
     asio::post(io_, [this] {
       asio::error_code ignored;
       acceptor_.close(ignored);
-      cron_timer_.cancel(ignored);
+      // No error_code overload here: it is deprecated, and we build with
+      // ASIO_NO_DEPRECATED.
+      cron_timer_.cancel();
       io_.stop();
     });
   }

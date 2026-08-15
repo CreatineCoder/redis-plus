@@ -4,11 +4,10 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <mutex>
 #include <string>
 
 #if defined(_WIN32)
-#include <io.h>
+#include <process.h>  // _getpid
 #else
 #include <fcntl.h>
 #include <unistd.h>
@@ -167,7 +166,13 @@ class Reader {
     return fail();
   }
 
-  std::string str(std::string* error) {
+  // Errors are recorded on the reader rather than written through a caller
+  // pointer: rdb_parse's `error` argument is allowed to be null, and writing
+  // through it here would be a null dereference on a malformed file -- the
+  // exact input most likely to hit this path.
+  const std::string& error() const { return error_; }
+
+  std::string str() {
     bool encoded = false;
     std::uint8_t encoding = 0;
     const std::uint64_t len = length(&encoded, &encoding);
@@ -185,13 +190,13 @@ class Reader {
         case kEncInt32:
           return std::to_string(static_cast<std::int32_t>(u32_le()));
         case kEncLzf:
-          *error =
+          error_ =
               "LZF-compressed strings are not supported; re-save with "
               "rdbcompression no";
           ok_ = false;
           return {};
         default:
-          *error = "unknown string encoding " + std::to_string(encoding);
+          error_ = "unknown string encoding " + std::to_string(encoding);
           ok_ = false;
           return {};
       }
@@ -216,6 +221,7 @@ class Reader {
   std::string_view data_;
   std::size_t pos_ = 0;
   bool ok_ = true;
+  std::string error_;
 };
 
 bool fail(std::string* error, std::string message) {
@@ -315,8 +321,8 @@ bool rdb_parse(std::string_view payload, std::vector<Record>* out,
 
     switch (opcode) {
       case kOpAux: {
-        r.str(error);
-        r.str(error);
+        r.str();
+        r.str();
         break;
       }
       case kOpSelectDb: {
@@ -340,14 +346,14 @@ bool rdb_parse(std::string_view payload, std::vector<Record>* out,
         break;
       case kTypeString: {
         Record record;
-        record.key = r.str(error);
-        record.value = r.str(error);
+        record.key = r.str();
+        record.value = r.str();
         record.expire_at = pending_expiry;
         pending_expiry = kNoExpiry;
         if (!r.ok()) {
-          return fail(error, error && !error->empty()
-                                 ? *error
-                                 : "truncated while reading a key");
+          out->clear();  // never hand back a partially loaded keyspace
+          return fail(error, r.error().empty() ? "truncated while reading a key"
+                                               : r.error());
         }
         out->push_back(std::move(record));
         break;
@@ -359,8 +365,9 @@ bool rdb_parse(std::string_view payload, std::vector<Record>* out,
     }
 
     if (!r.ok()) {
-      return fail(error, (error && !error->empty()) ? *error
-                                                   : "truncated payload");
+      out->clear();
+      return fail(error,
+                  r.error().empty() ? "truncated payload" : r.error());
     }
   }
 

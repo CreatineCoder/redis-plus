@@ -202,20 +202,20 @@ TEST_F(CommandTest, UnknownCommand) {
 // Handler-level: parsing and dispatch together, over a buffer.
 // ---------------------------------------------------------------------------
 
-struct HandlerTest : public ::testing::Test {
+struct RespHandlerTest : public ::testing::Test {
   std::shared_ptr<rp::Store> store = std::make_shared<rp::Store>();
   rp::RespHandler handler{store};
   rp::Buffer in, out;
 };
 
-TEST_F(HandlerTest, PipelinedSetGet) {
+TEST_F(RespHandlerTest, PipelinedSetGet) {
   in.append("*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n*2\r\n$3\r\nGET\r\n$1\r\nk\r\n");
   EXPECT_EQ(handler.on_data(in, out), 2u);
   EXPECT_EQ(out.readable(), "+OK\r\n$1\r\nv\r\n");
   EXPECT_TRUE(in.empty());
 }
 
-TEST_F(HandlerTest, PartialRequestWaitsForRest) {
+TEST_F(RespHandlerTest, PartialRequestWaitsForRest) {
   in.append("*2\r\n$3\r\nGET\r\n$1\r");
   EXPECT_EQ(handler.on_data(in, out), 0u);
   EXPECT_TRUE(out.empty());
@@ -224,7 +224,7 @@ TEST_F(HandlerTest, PartialRequestWaitsForRest) {
   EXPECT_EQ(out.readable(), "$-1\r\n");
 }
 
-TEST_F(HandlerTest, ProtocolErrorRepliesOnceAndStops) {
+TEST_F(RespHandlerTest, ProtocolErrorRepliesOnceAndStops) {
   in.append("*abc\r\n*1\r\n$4\r\nPING\r\n");
   EXPECT_EQ(handler.on_data(in, out), 0u);
   const std::string reply(out.readable());
@@ -233,7 +233,7 @@ TEST_F(HandlerTest, ProtocolErrorRepliesOnceAndStops) {
   EXPECT_TRUE(in.empty());  // framing is lost; the rest is discarded
 }
 
-TEST_F(HandlerTest, EmptyMultibulkProducesNoReply) {
+TEST_F(RespHandlerTest, EmptyMultibulkProducesNoReply) {
   in.append("*0\r\n*1\r\n$4\r\nPING\r\n");
   EXPECT_EQ(handler.on_data(in, out), 1u);
   EXPECT_EQ(out.readable(), "+PONG\r\n");

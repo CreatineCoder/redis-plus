@@ -7,34 +7,52 @@ absolute number does not.
 
 Reproduce with `./bench/run_phase1.sh ./build/redis-plus`.
 
-## Machine
+## Machine — run of 2026-08-16
 
 | Field | Value |
 |---|---|
-| CPU | _TBD_ |
-| RAM | _TBD_ |
-| OS / kernel | _TBD_ |
-| fd limit (`ulimit -n`) | _TBD_ |
-| Compiler | _TBD_ |
+| CPU | AMD Ryzen 5 5600H (6C / 12T) |
+| RAM | 15.4 GB |
+| OS | Windows 10 Home 19H1, build 18362 |
+| Compiler | GCC 13.2.0 (MinGW-w64, UCRT, posix-seh) |
 | Build type | RelWithDebInfo |
+| Backend | asio (IOCP). `poll` is POSIX-only and was **not** measured here |
 
-## Phase 1 — connection core
+## Phase 1 — connection core (partially measured)
 
-| Subject | Peak concurrent conns (0 failures) | PING ops/sec (P=1) | PING ops/sec (P=16) | p50 (ms) | p99 (ms) |
-|---|---|---|---|---|---|
-| legacy (`redis-cpp-legacy`) | _TBD_ | _TBD_ | n/a — no pipelining support | _TBD_ | _TBD_ |
-| redis-plus, `poll` backend | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| redis-plus, `asio` backend | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| real redis (baseline) | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+Client and server on the same host over loopback, `conn_scale --rounds 3`.
 
-**Derived claims** (fill in once measured, then use these verbatim on the résumé):
+| Concurrent connections | Established | Failed | Connect time | p50 (ms) | p95 (ms) | p99 (ms) | max (ms) |
+|---|---|---|---|---|---|---|---|
+| 500 | 500/500 | 0 | 42 ms | 0.022 | 0.037 | 0.057 | 0.420 |
+| 2 000 | 2000/2000 | 0 | 195 ms | 0.022 | 0.034 | 0.042 | 0.096 |
+| 5 000 | 5000/5000 | 0 | 484 ms | 0.023 | 0.038 | 0.048 | 0.820 |
 
-- Sustained _N_ concurrent connections with zero rejected connections.
-- _X_% of real Redis's PING throughput on identical hardware.
-- _Y_× the legacy implementation's connection ceiling.
+**What this does and does not show.** Latency is flat from 500 to 5 000
+connections — p50 moves by 1 µs and p99 actually improves — so the loop is not
+degrading with connection count, which is the property Phase 1 was built for.
+5 000 is the largest size run, not a measured ceiling; nothing failed at it.
 
-> Do not fill these in from expectation. Numbers go here only after
-> `run_phase1.sh` has actually produced them.
+Still missing, and **not** to be quoted until measured:
+
+- **No real-Redis baseline** — there is no official Redis for Windows, so
+  every number above is unanchored. Needs Linux.
+- **No throughput figure** — `redis-benchmark` ships with Redis; same blocker.
+- **No `poll` backend comparison** — POSIX only.
+- **No legacy comparison** — the reference server does not build on Windows.
+
+**Derived claims.** Only the first is currently supportable:
+
+- ✅ Sustained 5 000 concurrent connections, zero rejected, with flat p99.
+- ⬜ _X_% of real Redis's throughput — blocked on a Linux baseline.
+- ⬜ _Y_× the legacy connection ceiling — blocked on building the legacy server.
+
+## Phase 4 — persistence (smoke-verified, not benchmarked)
+
+Verified by hand on the running server: `SAVE` wrote a 73-byte RDB, the process
+was killed, and a fresh process restored all 3 keys — with an already-expired
+key correctly *not* resurrected. Timings at 1M keys still need
+`bench/run_phase4.sh`, which needs `redis-benchmark`.
 
 ## Later phases
 

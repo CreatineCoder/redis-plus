@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <limits>
+#include <utility>  // std::swap, in the character-class matcher
 
 namespace rp {
 namespace {

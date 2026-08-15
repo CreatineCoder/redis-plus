@@ -9,18 +9,22 @@ full data-type coverage — with every claim backed by a reproducible benchmark.
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Scaffold, build, test + benchmark harness | **done** |
-| 1 | Connection core: buffers, deferred writes, dual backend | **done (unbuilt — see below)** |
-| 2 | Incremental RESP parser + core commands | **done (unbuilt)** |
-| 3 | Expiry: active cycle + memory gate | **done (unbuilt)** |
-| 4 | Persistence (RDB snapshot, AOF) | **done (unbuilt)** |
+| 1 | Connection core: buffers, deferred writes, dual backend | **done, tests green** |
+| 2 | Incremental RESP parser + core commands | **done, tests green** |
+| 3 | Expiry: active cycle + memory gate | **done, tests green** |
+| 4 | Persistence (RDB snapshot, AOF) | **done, tests green** |
 | 5 | Replication (PSYNC, streaming, offsets) | not started |
 | 6 | Data types, transactions, pub/sub | not started |
 
-> **Not yet compiled.** The development machine has no C++ toolchain
-> installed, so Phase 1 is written but has never been built or run. Nothing in
-> `bench/results.md` is filled in and no correctness claim here is verified.
-> First task on a machine with a toolchain: build, run `ctest`, fix what falls
-> out.
+**Verified 2026-08-16** on GCC 13.2 (MinGW-w64, Windows): builds clean with
+`-Wall -Wextra -Wpedantic`, **137/137 tests pass**, and the server was driven
+end to end over TCP — commands, expiry, snapshot, kill, restore. It sustained
+5 000 concurrent connections with flat p99 latency; see
+[bench/results.md](bench/results.md).
+
+> **Not yet measured against real Redis.** There is no official Redis for
+> Windows, so there is no throughput baseline and no `poll`-backend comparison
+> (POSIX only) yet. Those numbers need a Linux box.
 
 ## Layout
 

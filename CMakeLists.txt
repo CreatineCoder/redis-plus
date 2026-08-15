@@ -9,8 +9,27 @@ option(RP_BUILD_TESTS "Build unit + integration tests" ON)
 option(RP_BUILD_BENCH "Build benchmark harness" ON)
 option(RP_BUILD_FUZZ "Build libFuzzer targets (clang only)" OFF)
 
-find_package(asio CONFIG REQUIRED)
 find_package(Threads REQUIRED)
+
+# Dependencies come from vcpkg when a toolchain file is supplied; otherwise
+# CMake fetches them itself, so the project builds on a machine with nothing
+# but a compiler and CMake.
+find_package(asio CONFIG QUIET)
+if(NOT asio_FOUND)
+  message(STATUS "asio not found via find_package; fetching it")
+  include(FetchContent)
+  FetchContent_Declare(asio
+    GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
+    GIT_TAG asio-1-30-2
+    GIT_SHALLOW TRUE
+  )
+  FetchContent_MakeAvailable(asio)
+  # asio ships no CMake package; expose the same target name either way.
+  add_library(asio_fetched INTERFACE)
+  target_include_directories(asio_fetched INTERFACE ${asio_SOURCE_DIR}/asio/include)
+  target_link_libraries(asio_fetched INTERFACE Threads::Threads)
+  add_library(asio::asio ALIAS asio_fetched)
+endif()
 
 add_library(rp_core
   src/server.cpp
@@ -39,6 +58,15 @@ if(MSVC)
   target_compile_options(rp_core PRIVATE /W4 /permissive-)
 else()
   target_compile_options(rp_core PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# MinGW links libstdc++/libgcc/winpthread dynamically by default, so the
+# executable refuses to start unless the compiler's bin directory happens to be
+# on PATH -- which it is not for anyone who just runs the binary. Link them in.
+if(MINGW)
+  target_link_options(rp_core INTERFACE
+    -static-libgcc -static-libstdc++ -Wl,-Bstatic,--whole-archive -lwinpthread
+    -Wl,--no-whole-archive)
 endif()
 
 add_executable(redis-plus src/main.cpp)

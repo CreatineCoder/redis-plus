@@ -145,10 +145,9 @@ TEST(Rdb, RejectsEmptyPayload) {
 
 struct RdbFileTest : public ::testing::Test {
   std::string path = "test_dump.rdb";
-  void TearDown() override {
-    std::remove(path.c_str());
-    std::remove((path + ".tmp").c_str());
-  }
+  void TearDown() override { std::remove(path.c_str()); }
+  // The temp file rdb_save_file uses is named with the pid and renamed away on
+  // success, so there is nothing else to clean up here.
 };
 
 TEST_F(RdbFileTest, SaveThenLoad) {
