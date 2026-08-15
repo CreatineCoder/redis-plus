@@ -32,6 +32,15 @@ struct ExpiryStats {
   std::uint64_t passes = 0;
 };
 
+// One key as it crosses a persistence or replication boundary. Deliberately
+// flat and self-contained: this is what gets written to an RDB file and, in
+// Phase 5, streamed to a replica.
+struct Record {
+  std::string key;
+  std::string value;
+  std::int64_t expire_at = kNoExpiry;
+};
+
 // The keyspace.
 //
 // Values are strings for now; Phase 6 widens Entry to a variant. Keys carrying
@@ -74,6 +83,14 @@ class Store {
   }
   std::int64_t clock() const { return clock_(); }
   const ExpiryStats& expiry_stats() const { return stats_; }
+
+  // All live keys, with absolute deadlines. Expired-but-unreaped keys are
+  // skipped -- a snapshot must never resurrect a key that was already dead.
+  std::vector<Record> snapshot();
+
+  // Insert without touching expiry semantics or stats. Used when loading a
+  // snapshot at boot; an already-past deadline is dropped rather than stored.
+  void load_record(const Record& record);
 
   // One active expiry cycle: repeated sampling passes over the expires index.
   // Returns the number of keys reaped. Cheap and bounded -- safe to call from

@@ -12,7 +12,7 @@ full data-type coverage — with every claim backed by a reproducible benchmark.
 | 1 | Connection core: buffers, deferred writes, dual backend | **done (unbuilt — see below)** |
 | 2 | Incremental RESP parser + core commands | **done (unbuilt)** |
 | 3 | Expiry: active cycle + memory gate | **done (unbuilt)** |
-| 4 | Persistence (RDB snapshot, AOF) | not started |
+| 4 | Persistence (RDB snapshot, AOF) | **done (unbuilt)** |
 | 5 | Replication (PSYNC, streaming, offsets) | not started |
 | 6 | Data types, transactions, pub/sub | not started |
 
@@ -49,11 +49,19 @@ ctest --test-dir build --output-on-failure
 ./build/redis-plus --port 6379 --backend asio   # epoll/kqueue/IOCP
 ./build/redis-plus --port 6379 --backend poll   # POSIX poll(2)
 redis-cli -p 6379 PING
+
+# persistence
+./build/redis-plus --dir /var/lib/redis-plus --save 300 100
+./build/redis-plus --appendonly yes --appendfsync everysec
 ```
+
+State is restored before the first connection is accepted. A corrupt data
+file aborts startup rather than starting with silently missing keys.
 
 Commands as of Phase 2: `PING ECHO SET GET DEL UNLINK EXISTS TYPE KEYS EXPIRE
 PEXPIRE EXPIREAT PEXPIREAT TTL PTTL PERSIST DBSIZE FLUSHALL FLUSHDB CONFIG INFO
-COMMAND SELECT QUIT`. `SET` supports `EX PX EXAT PXAT NX XX KEEPTTL GET`.
+COMMAND SELECT QUIT SAVE BGSAVE BGREWRITEAOF`. `SET` supports
+`EX PX EXAT PXAT NX XX KEEPTTL GET`.
 
 Other data types are Phase 6; everything is a string until then.
 

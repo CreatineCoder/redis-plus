@@ -6,14 +6,22 @@
 #include <string_view>
 
 #include "rp/commands.hpp"
+#include "rp/persistence.hpp"
 #include "rp/server.hpp"
 #include "rp/store.hpp"
 
 namespace {
 
 void usage() {
-  std::cerr << "usage: redis-plus [--port N] [--bind ADDR] "
-               "[--backend asio|poll]\n";
+  std::cerr << "usage: redis-plus [options]\n"
+               "  --port N              listen port (default 6379)\n"
+               "  --bind ADDR           bind address (default 0.0.0.0)\n"
+               "  --backend asio|poll   event loop (default asio)\n"
+               "  --dir PATH            working directory for data files\n"
+               "  --dbfilename NAME     RDB filename (default dump.rdb)\n"
+               "  --save SEC CHANGES    snapshot policy; 0 0 disables\n"
+               "  --appendonly yes|no   enable the AOF (default no)\n"
+               "  --appendfsync always|everysec|no\n";
 }
 
 }  // namespace
@@ -23,6 +31,7 @@ int main(int argc, char** argv) {
   std::cerr << std::unitbuf;
 
   rp::ServerConfig cfg;
+  rp::PersistenceConfig persist_cfg;
   rp::Backend backend = rp::Backend::kAsio;
 
   for (int i = 1; i < argc; ++i) {
@@ -41,14 +50,22 @@ int main(int argc, char** argv) {
       cfg.bind_address = next();
     } else if (arg == "--backend") {
       const std::string b = next();
-      if (b == "poll") {
-        backend = rp::Backend::kPoll;
-      } else if (b == "asio") {
-        backend = rp::Backend::kAsio;
-      } else {
-        usage();
-        return 1;
-      }
+      if (b == "poll") backend = rp::Backend::kPoll;
+      else if (b == "asio") backend = rp::Backend::kAsio;
+      else { usage(); return 1; }
+    } else if (arg == "--dir") {
+      persist_cfg.dir = next();
+    } else if (arg == "--dbfilename") {
+      persist_cfg.dbfilename = next();
+    } else if (arg == "--save") {
+      persist_cfg.save_seconds = std::stoi(next());
+      persist_cfg.save_changes = std::stoll(next());
+    } else if (arg == "--appendonly") {
+      persist_cfg.aof_enabled = (next() == "yes");
+    } else if (arg == "--appendfsync") {
+      bool ok = false;
+      persist_cfg.fsync_policy = rp::parse_fsync_policy(next(), &ok);
+      if (!ok) { usage(); return 1; }
     } else {
       usage();
       return 1;
@@ -57,15 +74,38 @@ int main(int argc, char** argv) {
 
   try {
     auto store = std::make_shared<rp::Store>();
-    // Active expiry rides the server cron on the event-loop thread, so keys
-    // that are set with a TTL and never read again are still reclaimed.
-    auto server = rp::make_server(
-        backend, cfg, std::make_shared<rp::RespHandler>(store),
-        [store] { store->active_expire_cycle(); });
+    auto handler = std::make_shared<rp::RespHandler>(store);
+    auto persistence =
+        std::make_shared<rp::Persistence>(store, persist_cfg);
+
+    // Restore before accepting a single connection, so no client can observe
+    // an empty keyspace that is about to be overwritten by the load.
+    std::string error;
+    if (!persistence->load(*handler, &error)) {
+      std::cerr << "fatal: cannot restore state: " << error << "\n"
+                << "Refusing to start on a corrupt data file. Move it aside "
+                   "to start empty.\n";
+      return 1;
+    }
+    std::cout << "loaded " << store->size() << " keys\n";
+
+    handler->set_persistence(persistence.get());
+    handler->set_propagate(
+        [persistence](const rp::Args& args) { persistence->on_write(args); });
+
+    auto server = rp::make_server(backend, cfg, handler, [store, persistence] {
+      store->active_expire_cycle();
+      persistence->cron();
+    });
+
     std::cout << "redis-plus listening on " << cfg.bind_address << ":"
               << server->port() << " (backend="
-              << (backend == rp::Backend::kPoll ? "poll" : "asio") << ")\n";
+              << (backend == rp::Backend::kPoll ? "poll" : "asio")
+              << ", rdb=" << (persist_cfg.rdb_enabled ? "on" : "off")
+              << ", aof=" << (persist_cfg.aof_enabled ? "on" : "off") << ")\n";
     server->run();
+
+    persistence->shutdown();
   } catch (const std::exception& e) {
     std::cerr << "fatal: " << e.what() << "\n";
     return 1;

@@ -20,6 +20,9 @@ add_library(rp_core
   src/resp.cpp
   src/store.cpp
   src/commands.cpp
+  src/rdb.cpp
+  src/aof.cpp
+  src/persistence.cpp
   src/stats.cpp
 )
 target_include_directories(rp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

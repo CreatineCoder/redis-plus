@@ -164,6 +164,26 @@ std::size_t Store::active_expire_cycle(const ExpiryConfig& cfg) {
   return total;
 }
 
+std::vector<Record> Store::snapshot() {
+  std::vector<Record> out;
+  out.reserve(map_.size());
+  const std::int64_t now = clock_();
+  for (const auto& [key, entry] : map_) {
+    const auto it = expires_.find(key);
+    const std::int64_t deadline = (it == expires_.end()) ? kNoExpiry : it->second;
+    if (deadline != kNoExpiry && now >= deadline) continue;  // already dead
+    out.push_back(Record{key, entry.value, deadline});
+  }
+  return out;
+}
+
+void Store::load_record(const Record& record) {
+  if (record.expire_at != kNoExpiry && clock_() >= record.expire_at) {
+    return;  // deadline already passed while the file sat on disk
+  }
+  set(record.key, record.value, record.expire_at);
+}
+
 std::size_t Store::reap_expired(std::size_t limit) {
   std::vector<std::string> dead;
   const std::int64_t now = clock_();

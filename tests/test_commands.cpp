@@ -15,8 +15,54 @@ struct CommandTest : public ::testing::Test {
       std::make_shared<rp::Store>([this] { return now; });
   rp::CommandTable table{*store};
 
-  std::string run(const rp::Args& args) { return table.dispatch(args); }
+  std::string run(const rp::Args& args) { return table.dispatch(args).reply; }
+  rp::CommandResult run_full(const rp::Args& args) {
+    return table.dispatch(args);
+  }
 };
+
+// Phase 4: what gets persisted is not always what the client sent. Relative
+// expiries must become absolute, or replaying the file later would extend
+// every TTL by however long the file sat unused.
+TEST_F(CommandTest, PropagatesSetWithAbsoluteExpiry) {
+  const auto result = run_full({"SET", "k", "v", "EX", "60"});
+  EXPECT_TRUE(result.dirty);
+  ASSERT_EQ(result.propagate.size(), 5u);
+  EXPECT_EQ(result.propagate[0], "SET");
+  EXPECT_EQ(result.propagate[3], "PXAT");
+  EXPECT_EQ(result.propagate[4], std::to_string(now + 60000));
+}
+
+TEST_F(CommandTest, PropagatesExpireAsPexpireat) {
+  run({"SET", "k", "v"});
+  const auto result = run_full({"EXPIRE", "k", "30"});
+  ASSERT_EQ(result.propagate.size(), 3u);
+  EXPECT_EQ(result.propagate[0], "PEXPIREAT");
+  EXPECT_EQ(result.propagate[2], std::to_string(now + 30000));
+}
+
+TEST_F(CommandTest, ReadsAreNotDirty) {
+  run({"SET", "k", "v"});
+  EXPECT_FALSE(run_full({"GET", "k"}).dirty);
+  EXPECT_FALSE(run_full({"TTL", "k"}).dirty);
+  EXPECT_FALSE(run_full({"KEYS", "*"}).dirty);
+  EXPECT_FALSE(run_full({"PING"}).dirty);
+}
+
+// A write that did not actually change anything must not be persisted.
+TEST_F(CommandTest, NoOpWritesAreNotDirty) {
+  EXPECT_FALSE(run_full({"DEL", "absent"}).dirty);
+  EXPECT_FALSE(run_full({"EXPIRE", "absent", "10"}).dirty);
+  EXPECT_FALSE(run_full({"PERSIST", "absent"}).dirty);
+  run({"SET", "k", "v"});
+  EXPECT_FALSE(run_full({"SET", "k", "other", "NX"}).dirty);
+}
+
+TEST_F(CommandTest, SuccessfulWritesAreDirty) {
+  EXPECT_TRUE(run_full({"SET", "k", "v"}).dirty);
+  EXPECT_TRUE(run_full({"DEL", "k"}).dirty);
+  EXPECT_TRUE(run_full({"FLUSHALL"}).dirty);
+}
 
 TEST_F(CommandTest, Ping) {
   EXPECT_EQ(run({"PING"}), "+PONG\r\n");

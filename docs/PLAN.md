@@ -67,12 +67,32 @@ fuzzing hour under ASan+UBSan with the hours recorded.
 **Gate:** `bench/run_phase3.sh` — RSS plateaus under sustained
 never-read expiring writes, and throughput from Phase 2 does not regress.
 
-## Phase 4 — persistence
+## Phase 4 — persistence ✅ written
 
-RDB writer/loader (compatible enough for `redis-check-rdb`), `SAVE`/`BGSAVE`,
-load-on-boot; then AOF with `fsync` policies and replay.
-**Gate:** `kill -9` → restart → data intact; snapshot/recovery time @ 1M keys;
-throughput cost per `fsync` policy.
+- **RDB** in the real on-disk format: `REDIS0011` magic, length-prefixed
+  strings, expiry opcodes, CRC64 trailer. Not an invented format, for two
+  reasons: `redis-check-rdb` can validate our output, and Phase 5 ships this
+  exact payload as the full-resync body.
+- The CRC is verified **before** any record is interpreted, so a corrupt
+  snapshot is never partially applied, and boot fails loudly rather than
+  starting with silently missing data.
+- Saves are atomic: temp file → fsync → rename. A crash mid-save cannot
+  destroy the previous good snapshot.
+- **AOF** as a RESP command stream, so replay reuses the Phase 2 parser and
+  command table — no second code path to keep in sync. `always` / `everysec` /
+  `no` fsync policies; rewrite compacts it.
+- Relative expiries are rewritten to absolute deadlines before persisting.
+  Replaying `SET k v EX 60` an hour later must not grant another minute.
+- A torn tail (last command half-written) is recovered, since that is the
+  normal crash case; garbage in the *middle* is rejected as corruption.
+
+**Deviation from redis, deliberate:** `BGSAVE` copies the keyspace and writes
+from a thread instead of `fork()` + copy-on-write, which does not exist on
+Windows. The cost is roughly the live data size in extra memory during a save.
+Noted here because it is a real trade, not an implementation detail.
+
+**Gate:** `bench/run_phase4.sh` — snapshot time and size @ 1M keys, recovery
+time, throughput per fsync policy, and a real `kill -9` test.
 
 ## Phase 5 — replication
 

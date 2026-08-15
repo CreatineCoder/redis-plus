@@ -8,6 +8,8 @@ add_executable(rp_tests
   test_store.cpp
   test_expiry.cpp
   test_commands.cpp
+  test_rdb.cpp
+  test_persistence.cpp
   test_server.cpp
 )
 target_link_libraries(rp_tests PRIVATE rp_core GTest::gtest GTest::gtest_main)
