@@ -22,6 +22,7 @@ add_executable(rp_tests
   test_commands.cpp
   test_rdb.cpp
   test_persistence.cpp
+  test_replication.cpp
   test_server.cpp
 )
 target_link_libraries(rp_tests PRIVATE rp_core GTest::gtest GTest::gtest_main)

@@ -23,7 +23,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -40,7 +42,19 @@ void set_nonblocking(int fd) {
   if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-struct Conn {
+class PollServer;
+
+// One client. Doubles as its own ClientLink so the master can push replication
+// traffic at it long after its last request.
+struct Conn : public ClientLink {
+  Conn(int fd, std::string peer) : fd(fd), peer_name(std::move(peer)) {}
+
+  void send(std::string_view data) override { out.append(data); }
+  void close() override { close_after_flush = true; }
+  std::string peer() const override { return peer_name; }
+
+  int fd;
+  std::string peer_name;
   Buffer in;
   Buffer out;
   bool close_after_flush = false;
@@ -104,6 +118,7 @@ class PollServer : public Server {
           cron_ ? std::min(kPollTimeoutMs, cfg_.cron_interval_ms)
                 : kPollTimeoutMs;
       const int ready = ::poll(fds.data(), fds.size(), timeout);
+      drain_posted();
       run_cron_if_due();
       if (ready < 0) {
         if (errno == EINTR) continue;
@@ -140,10 +155,18 @@ class PollServer : public Server {
 
   std::uint16_t port() const override { return port_; }
 
+  void post(std::function<void()> task) override {
+    std::lock_guard<std::mutex> lock(posted_mutex_);
+    posted_.push_back(std::move(task));
+  }
+
  private:
   void accept_ready() {
     for (;;) {  // drain the backlog; the socket is non-blocking
-      const int fd = ::accept(listen_fd_, nullptr, nullptr);
+      sockaddr_in peer{};
+      socklen_t peer_len = sizeof(peer);
+      const int fd =
+          ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&peer), &peer_len);
       if (fd < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return;
         if (errno == EMFILE || errno == ENFILE) {
@@ -157,7 +180,12 @@ class PollServer : public Server {
         int one = 1;
         ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
       }
-      conns_.emplace(fd, std::make_unique<Conn>());
+      char address[INET_ADDRSTRLEN] = {0};
+      ::inet_ntop(AF_INET, &peer.sin_addr, address, sizeof(address));
+      auto conn = std::make_unique<Conn>(
+          fd, std::string(address) + ":" + std::to_string(ntohs(peer.sin_port)));
+      handler_->on_connect(conn.get());
+      conns_.emplace(fd, std::move(conn));
       Stats::instance().on_connect();
     }
   }
@@ -183,7 +211,7 @@ class PollServer : public Server {
       return false;
     }
 
-    stats.commands_processed.fetch_add(handler_->on_data(c.in, c.out),
+    stats.commands_processed.fetch_add(handler_->on_data(&c, c.in, c.out),
                                        std::memory_order_relaxed);
     if (c.out.size() > cfg_.max_output_buffer) {
       stats.output_buffer_overflows.fetch_add(1, std::memory_order_relaxed);
@@ -228,9 +256,24 @@ class PollServer : public Server {
   }
 
   void drop(int fd) {
-    if (conns_.erase(fd) == 0) return;
+    auto it = conns_.find(fd);
+    if (it == conns_.end()) return;
+    handler_->on_disconnect(it->second.get());
+    conns_.erase(it);
     ::close(fd);
     Stats::instance().on_disconnect();
+  }
+
+  // Drain work posted from other threads. poll() already wakes on its timeout,
+  // so no self-pipe is needed; the cost is up to one cron interval of latency
+  // before a posted task runs.
+  void drain_posted() {
+    std::vector<std::function<void()>> tasks;
+    {
+      std::lock_guard<std::mutex> lock(posted_mutex_);
+      tasks.swap(posted_);
+    }
+    for (auto& task : tasks) task();
   }
 
   static constexpr int kPollTimeoutMs = 100;  // bounds stop() latency
@@ -247,6 +290,8 @@ class PollServer : public Server {
       std::chrono::steady_clock::now();
   std::vector<char> scratch_;
   std::unordered_map<int, std::unique_ptr<Conn>> conns_;
+  std::mutex posted_mutex_;
+  std::vector<std::function<void()>> posted_;
   int listen_fd_ = -1;
   std::uint16_t port_ = 0;
   std::atomic<bool> stopping_{false};

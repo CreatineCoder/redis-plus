@@ -7,6 +7,7 @@
 
 #include "rp/commands.hpp"
 #include "rp/persistence.hpp"
+#include "rp/replication.hpp"
 #include "rp/server.hpp"
 #include "rp/store.hpp"
 
@@ -21,7 +22,8 @@ void usage() {
                "  --dbfilename NAME     RDB filename (default dump.rdb)\n"
                "  --save SEC CHANGES    snapshot policy; 0 0 disables\n"
                "  --appendonly yes|no   enable the AOF (default no)\n"
-               "  --appendfsync always|everysec|no\n";
+               "  --appendfsync always|everysec|no\n"
+               "  --replicaof HOST PORT replicate from this master\n";
 }
 
 }  // namespace
@@ -33,6 +35,8 @@ int main(int argc, char** argv) {
   rp::ServerConfig cfg;
   rp::PersistenceConfig persist_cfg;
   rp::Backend backend = rp::Backend::kAsio;
+  std::string replicaof_host;
+  std::uint16_t replicaof_port = 0;
 
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg = argv[i];
@@ -62,6 +66,9 @@ int main(int argc, char** argv) {
       persist_cfg.save_changes = std::stoll(next());
     } else if (arg == "--appendonly") {
       persist_cfg.aof_enabled = (next() == "yes");
+    } else if (arg == "--replicaof") {
+      replicaof_host = next();
+      replicaof_port = static_cast<std::uint16_t>(std::stoi(next()));
     } else if (arg == "--appendfsync") {
       bool ok = false;
       persist_cfg.fsync_policy = rp::parse_fsync_policy(next(), &ok);
@@ -89,14 +96,38 @@ int main(int argc, char** argv) {
     }
     std::cout << "loaded " << store->size() << " keys\n";
 
+    auto replication = std::make_shared<rp::Replication>(store);
+    replication->set_listening_port(cfg.port);
+    replication->set_apply(
+        [handler](const rp::Args& args) { handler->apply_silently(args); });
+
     handler->set_persistence(persistence.get());
-    handler->set_propagate(
-        [persistence](const rp::Args& args) { persistence->on_write(args); });
+    handler->set_replication(replication.get());
+
+    // One hook, two consumers: every write that changed the keyspace goes to
+    // the AOF and to every attached replica, in canonical (absolute-expiry)
+    // form. Phase 4 built this seam; Phase 5 just hangs off it.
+    handler->set_propagate([persistence, replication](const rp::Args& args) {
+      persistence->on_write(args);
+      replication->propagate(args);
+    });
 
     auto server = rp::make_server(backend, cfg, handler, [store, persistence] {
       store->active_expire_cycle();
       persistence->cron();
     });
+
+    replication->attach(server.get());
+    if (!replicaof_host.empty()) {
+      std::string replica_error;
+      if (!replication->replicaof(replicaof_host, replicaof_port,
+                                  &replica_error)) {
+        std::cerr << "fatal: " << replica_error << "\n";
+        return 1;
+      }
+      std::cout << "replicating from " << replicaof_host << ":"
+                << replicaof_port << "\n";
+    }
 
     std::cout << "redis-plus listening on " << cfg.bind_address << ":"
               << server->port() << " (backend="
@@ -105,6 +136,7 @@ int main(int argc, char** argv) {
               << ", aof=" << (persist_cfg.aof_enabled ? "on" : "off") << ")\n";
     server->run();
 
+    replication->stop_replication();
     persistence->shutdown();
   } catch (const std::exception& e) {
     std::cerr << "fatal: " << e.what() << "\n";

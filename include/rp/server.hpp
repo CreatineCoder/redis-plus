@@ -42,6 +42,11 @@ class Server {
   virtual void run() = 0;   // blocks until stop()
   virtual void stop() = 0;
   virtual std::uint16_t port() const = 0;  // resolved port (useful when 0)
+
+  // Run `task` on the event-loop thread. The only thread-safe entry point on
+  // this interface, and the way work from other threads (a replica's link to
+  // its master) reaches the store without any locking.
+  virtual void post(std::function<void()> task) = 0;
 };
 
 enum class Backend {

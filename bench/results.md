@@ -54,6 +54,22 @@ was killed, and a fresh process restored all 3 keys — with an already-expired
 key correctly *not* resurrected. Timings at 1M keys still need
 `bench/run_phase4.sh`, which needs `redis-benchmark`.
 
+## Phase 5 — replication (functionally verified, not load-tested)
+
+Three separate OS processes on one host: master on 7400, replicas on 7401/7402.
+
+| Check | Result |
+|---|---|
+| Full resync of a pre-existing key | both replicas served it |
+| 1 000 streamed writes | master 1000, r1 1000, r2 1000 |
+| Offset convergence | `master_repl_offset:35786`, both replicas `offset=35786`, `lag=0` |
+| TTL propagation (`SET … EX 300`) | master `TTL 299`, replica `TTL 299` |
+| Delete propagation | `DEL` on master → `$-1` on replica |
+| Client write to a replica | `READONLY You can't write against a read only replica.` |
+
+Not yet measured: replication lag under sustained load, and full-resync time at
+1M keys. Both need `redis-benchmark`.
+
 ## Later phases
 
 | Phase | Metric | Value |

@@ -13,7 +13,7 @@ full data-type coverage — with every claim backed by a reproducible benchmark.
 | 2 | Incremental RESP parser + core commands | **done, tests green** |
 | 3 | Expiry: active cycle + memory gate | **done, tests green** |
 | 4 | Persistence (RDB snapshot, AOF) | **done, tests green** |
-| 5 | Replication (PSYNC, streaming, offsets) | not started |
+| 5 | Replication (PSYNC, streaming, offsets) | **done, tests green** |
 | 6 | Data types, transactions, pub/sub | not started |
 
 **Verified 2026-08-16** on GCC 13.2 (MinGW-w64, Windows): builds clean with
@@ -57,6 +57,12 @@ redis-cli -p 6379 PING
 # persistence
 ./build/redis-plus --dir /var/lib/redis-plus --save 300 100
 ./build/redis-plus --appendonly yes --appendfsync everysec
+
+# replication: a master and two replicas
+./build/redis-plus --port 7400
+./build/redis-plus --port 7401 --replicaof 127.0.0.1 7400
+./build/redis-plus --port 7402 --replicaof 127.0.0.1 7400
+redis-cli -p 7400 INFO replication    # connected_slaves, per-replica offsets
 ```
 
 State is restored before the first connection is accepted. A corrupt data

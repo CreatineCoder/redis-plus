@@ -42,6 +42,7 @@ add_library(rp_core
   src/rdb.cpp
   src/aof.cpp
   src/persistence.cpp
+  src/replication.cpp
   src/stats.cpp
 )
 target_include_directories(rp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

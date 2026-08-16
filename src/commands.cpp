@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 
+#include "rp/replication.hpp"
 #include "rp/resp.hpp"
 #include "rp/stats.hpp"
 
@@ -254,7 +255,8 @@ std::string cmd_flushall(Store& store, const Args& a, CommandResult* out) {
   return reply::ok();
 }
 
-std::string cmd_info(Store& store, PersistenceOps* persistence) {
+std::string cmd_info(Store& store, PersistenceOps* persistence,
+                     ReplicationOps* replication) {
   // Connection-level counters come from Stats; keyspace and expiry counters
   // can only come from the store. Both use real redis' field names so that
   // redis-cli INFO and the benchmark scripts read them unmodified.
@@ -271,6 +273,10 @@ std::string cmd_info(Store& store, PersistenceOps* persistence) {
     info += "\r\n# Persistence\r\n";
     info += persistence->info_section();
   }
+  if (replication != nullptr) {
+    info += "\r\n# Replication\r\n";
+    info += replication->info_section();
+  }
   info += "\r\n# Keyspace\r\n";
   // Always emitted, unlike real redis, which omits empty databases: `tracked`
   // minus `keys` is exactly the expiry backlog, and monitoring it is the point.
@@ -282,12 +288,83 @@ std::string cmd_info(Store& store, PersistenceOps* persistence) {
 
 }  // namespace
 
-CommandResult CommandTable::dispatch(const Args& args) {
+CommandResult CommandTable::dispatch(const Args& args, ClientLink* link) {
   CommandResult result;
   if (args.empty()) return result;  // e.g. "*0\r\n" -- no reply, by design
 
   const std::string name = upper(args[0]);
   auto& r = result.reply;
+
+  // A replica's keyspace belongs to its master. Accepting a client write here
+  // would fork the two datasets with no way to reconcile them, so refuse --
+  // but only for real clients: `link == nullptr` is the master's own stream
+  // being applied, which must go through.
+  if (link != nullptr && replication_ != nullptr && replication_->is_replica() &&
+      is_write_command(name)) {
+    result.reply = reply::error(
+        "READONLY You can't write against a read only replica.");
+    return result;
+  }
+
+  if (name == "REPLCONF") {
+    // REPLCONF listening-port <p> | capa <c> | ACK <offset> | GETACK *
+    if (replication_ != nullptr && args.size() >= 3) {
+      const std::string sub = upper(args[1]);
+      if (sub == "ACK") {
+        std::int64_t offset = 0;
+        to_int64(args[2], offset);
+        replication_->on_replica_ack(link, offset);
+        return result;  // ACK is the one command that gets no reply
+      }
+      if (sub == "LISTENING-PORT") {
+        std::int64_t port = 0;
+        if (to_int64(args[2], port) && port > 0 && port <= 65535) {
+          replication_->set_replica_port(link,
+                                         static_cast<std::uint16_t>(port));
+        }
+      }
+    }
+    result.reply = reply::ok();
+    return result;
+  }
+
+  if (name == "PSYNC") {
+    if (replication_ == nullptr) {
+      result.reply = reply::error("ERR replication is not enabled");
+    } else {
+      // Everything after this is written straight to the link, not returned:
+      // the RDB payload is not a normal reply and must not be reordered with
+      // one.
+      replication_->start_full_resync(link);
+    }
+    return result;
+  }
+
+  if (name == "REPLICAOF" || name == "SLAVEOF") {
+    if (args.size() != 3) return {reply::wrong_arity("replicaof"), false, {}};
+    if (replication_ == nullptr) {
+      result.reply = reply::error("ERR replication is not enabled");
+      return result;
+    }
+    if (iequals(args[1], "NO") && iequals(args[2], "ONE")) {
+      replication_->stop_replication();
+      result.reply = reply::ok();
+      return result;
+    }
+    std::int64_t port = 0;
+    if (!to_int64(args[2], port) || port <= 0 || port > 65535) {
+      result.reply = reply::error("ERR Invalid master port");
+      return result;
+    }
+    std::string error;
+    if (!replication_->replicaof(args[1], static_cast<std::uint16_t>(port),
+                                 &error)) {
+      result.reply = reply::error("ERR " + error);
+    } else {
+      result.reply = reply::ok();
+    }
+    return result;
+  }
 
   if (name == "PING") r = cmd_ping(args);
   else if (name == "ECHO") r = cmd_echo(args);
@@ -328,7 +405,7 @@ CommandResult CommandTable::dispatch(const Args& args) {
       else r = reply::simple("Background append only file rewriting started");
     }
   }
-  else if (name == "INFO") r = cmd_info(store_, persistence_);
+  else if (name == "INFO") r = cmd_info(store_, persistence_, replication_);
   else if (name == "COMMAND") r = reply::empty_array();
   else if (name == "SELECT") r = reply::ok();  // single-db; accept and ignore
   else if (name == "QUIT") r = reply::ok();
@@ -348,7 +425,13 @@ CommandResult CommandTable::dispatch(const Args& args) {
   return result;
 }
 
-std::size_t RespHandler::on_data(Buffer& in, Buffer& out) {
+void RespHandler::on_disconnect(ClientLink* link) {
+  // A replica that drops must stop being fed, or the master writes into a
+  // dead link forever.
+  if (replication_ != nullptr) replication_->on_disconnect(link);
+}
+
+std::size_t RespHandler::on_data(ClientLink* link, Buffer& in, Buffer& out) {
   std::size_t handled = 0;
 
   for (;;) {
@@ -368,7 +451,7 @@ std::size_t RespHandler::on_data(Buffer& in, Buffer& out) {
     in.consume(result.consumed);
     if (result.args.empty()) continue;  // "*0\r\n" or a blank inline line
 
-    CommandResult outcome = table_.dispatch(result.args);
+    CommandResult outcome = table_.dispatch(result.args, link);
     out.append(outcome.reply);
 
     // Persist only after the write has actually been applied, and only the

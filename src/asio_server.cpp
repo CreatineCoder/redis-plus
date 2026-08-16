@@ -18,14 +18,20 @@ using asio::ip::tcp;
 // a single in-flight async_write with everything else queued in `out_`, which
 // is the piece the legacy server lacked -- it called send() inline and silently
 // truncated whenever the kernel buffer was full.
-class Session : public std::enable_shared_from_this<Session> {
+class Session : public ClientLink,
+                public std::enable_shared_from_this<Session> {
  public:
   Session(tcp::socket socket, const ServerConfig& cfg,
           std::shared_ptr<CommandHandler> handler)
       : socket_(std::move(socket)),
         cfg_(cfg),
         handler_(std::move(handler)),
-        scratch_(cfg.read_chunk) {}
+        scratch_(cfg.read_chunk) {
+    asio::error_code ec;
+    const auto endpoint = socket_.remote_endpoint(ec);
+    peer_ = ec ? "unknown" : endpoint.address().to_string() + ":" +
+                                 std::to_string(endpoint.port());
+  }
 
   void start() {
     Stats::instance().on_connect();
@@ -33,8 +39,25 @@ class Session : public std::enable_shared_from_this<Session> {
       asio::error_code ignored;
       socket_.set_option(tcp::no_delay(true), ignored);
     }
+    handler_->on_connect(this);
     read();
   }
+
+  // ClientLink. Always called on the event-loop thread.
+  void send(std::string_view data) override {
+    if (closed_) return;
+    pending_.append(data);
+    if (out_.size() + pending_.size() > cfg_.max_output_buffer) {
+      Stats::instance().output_buffer_overflows.fetch_add(
+          1, std::memory_order_relaxed);
+      return close();
+    }
+    flush();
+  }
+
+  void close() override { do_close(); }
+
+  std::string peer() const override { return peer_; }
 
  private:
   void read() {
@@ -42,7 +65,7 @@ class Session : public std::enable_shared_from_this<Session> {
     socket_.async_read_some(
         asio::buffer(scratch_.data(), scratch_.size()),
         [this, self](const asio::error_code& ec, std::size_t n) {
-          if (ec) return close();
+          if (ec) return do_close();
 
           auto& stats = Stats::instance();
           stats.bytes_read.fetch_add(n, std::memory_order_relaxed);
@@ -51,14 +74,14 @@ class Session : public std::enable_shared_from_this<Session> {
           // Replies always land in `pending_`: appending to `out_` while a
           // write is in flight could reallocate the vector that async_write
           // holds a raw pointer into.
-          const std::size_t handled = handler_->on_data(in_, pending_);
+          const std::size_t handled = handler_->on_data(this, in_, pending_);
           stats.commands_processed.fetch_add(handled,
                                              std::memory_order_relaxed);
 
           if (out_.size() + pending_.size() > cfg_.max_output_buffer) {
             stats.output_buffer_overflows.fetch_add(1,
                                                     std::memory_order_relaxed);
-            return close();
+            return do_close();
           }
 
           flush();
@@ -86,15 +109,16 @@ class Session : public std::enable_shared_from_this<Session> {
           writing_ = false;
           Stats::instance().bytes_written.fetch_add(written,
                                                     std::memory_order_relaxed);
-          if (ec) return close();
+          if (ec) return do_close();
           out_.consume(n);
           flush();
         });
   }
 
-  void close() {
+  void do_close() {
     if (closed_) return;
     closed_ = true;
+    handler_->on_disconnect(this);
     asio::error_code ignored;
     socket_.shutdown(tcp::socket::shutdown_both, ignored);
     socket_.close(ignored);
@@ -108,6 +132,7 @@ class Session : public std::enable_shared_from_this<Session> {
   Buffer in_;
   Buffer out_;
   Buffer pending_;
+  std::string peer_;
   bool writing_ = false;
   bool closed_ = false;
 };
@@ -144,6 +169,10 @@ class AsioServer : public Server {
 
   std::uint16_t port() const override {
     return acceptor_.local_endpoint().port();
+  }
+
+  void post(std::function<void()> task) override {
+    asio::post(io_, std::move(task));
   }
 
  private:

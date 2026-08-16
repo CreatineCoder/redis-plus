@@ -94,17 +94,37 @@ Noted here because it is a real trade, not an implementation detail.
 **Gate:** `bench/run_phase4.sh` — snapshot time and size @ 1M keys, recovery
 time, throughput per fsync policy, and a real `kill -9` test.
 
-## Phase 5 — replication
+## Phase 5 — replication ✅ written, tests green
 
-`REPLICAOF`, handshake (`PING` → `REPLCONF` → `PSYNC`), full resync via the
-Phase 4 RDB, then streaming propagation with `master_repl_offset` and
-`REPLCONF ACK`.
-**Gate:** two replicas converge under sustained writes; lag in ms and offset
-bytes; full-resync time @ 1M keys.
+- `ClientLink`: the connection layer gained the ability to *push* to a client.
+  Until now every byte sent was a reply to a request; a replica says nothing
+  after PSYNC and is pushed writes indefinitely. Both backends implement it,
+  and `Server::post()` is the one thread-safe entry point, so work arriving on
+  the replica's thread reaches the store without any locking.
+- Master: PSYNC promotes a connection to a replica — `+FULLRESYNC <replid>
+  <offset>`, then the Phase 4 RDB payload verbatim, then the write stream.
+  Offsets advance per byte and replicas `REPLCONF ACK` them, which makes lag a
+  number rather than a feeling.
+- Replica: background thread does the handshake (`PING` → `REPLCONF` ×2 →
+  `PSYNC`), loads the RDB, applies the stream, acknowledges every second.
+- Read-only replicas: a client write gets `READONLY`, while the master's own
+  stream (`link == nullptr`) passes. Without this the two datasets fork with
+  no way to reconcile them.
+- Writes propagate in canonical form, reusing Phase 4's absolute-expiry
+  rewriting. A relative TTL would otherwise be recomputed against the
+  replica's clock and drift.
+
+**Gate:** two replicas converge under sustained writes ✅ — verified both
+in-process and across three OS processes, with equal offsets and lag 0.
+Full-resync time @ 1M keys and lag under load still need `redis-benchmark`.
 
 Note: this is *asynchronous* replication, like real Redis — eventual
 consistency, with possible write loss if the master dies mid-flight. It is not
 by itself high availability; Sentinel-style failover would be a further phase.
+
+Not implemented: partial resync (`+CONTINUE` plus the backlog ring buffer), so
+a dropped replica does a full resync on reconnect; and chained replication,
+since applied commands are not re-propagated.
 
 ## Phase 6 — extensions beyond the original
 

@@ -71,7 +71,7 @@ bool contains_ci(std::string_view haystack, std::string_view needle) {
 
 }  // namespace
 
-std::size_t PingPongHandler::on_data(Buffer& in, Buffer& out) {
+std::size_t PingPongHandler::on_data(ClientLink*, Buffer& in, Buffer& out) {
   std::size_t handled = 0;
   for (;;) {
     const std::string_view view = in.readable();
